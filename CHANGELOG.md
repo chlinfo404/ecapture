@@ -1,3 +1,16 @@
+# v2.6.0 (2026-09-09)
+
+## What's Changed
+
+* textfix!: correct go.mod module path to include /v2 suffix by @cfc4n in https://github.com/gojue/ecapture/pull/1026
+* fix(cli): propagate eventaddr to TLS probes by @zidonghua-source in https://github.com/gojue/ecapture/pull/1027
+* Android 17 (API 37) BoringSSL: version offsets + TLS 1.3 keylog client/server + length fixes by @EJ in https://github.com/gojue/ecapture/pull/1029
+* test(e2e): install dnsutils in CI and fallback route detection when DNS fails by @cfc4n in https://github.com/gojue/ecapture/pull/1030
+* chore(deps): refresh Go dependencies and update CI configurations by @cfc4n in https://github.com/gojue/ecapture/pull/1031
+
+**Full Changelog**: https://github.com/gojue/ecapture/compare/v2.5.2...v2.6.0
+
+<hr>
 # v2.5.2 (2026-07-12)
 
 ## What's Changed
