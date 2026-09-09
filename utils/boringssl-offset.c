@@ -35,6 +35,7 @@
 #include <openssl/base.h>
 #include <openssl/crypto.h>
 #include <ssl/internal.h>
+#include <crypto/bio/internal.h>  // bio_st, bio_method_st (opaque in public headers; -I ./src/)
 #include <stddef.h>
 #include <stdio.h>
 #include <type_traits>
@@ -62,6 +63,12 @@ struct ssl3_state_has_version : std::false_type {};
 template <typename T>
 struct ssl3_state_has_version<T, std::void_t<decltype(std::declval<T>().version)>>
     : std::true_type {};
+
+// ssl_cipher_st::id  (uint32 in Android <=16; renamed to protocol_id/uint16 in Android 17)
+template <typename T, typename = void>
+struct ssl_cipher_has_id : std::false_type {};
+template <typename T>
+struct ssl_cipher_has_id<T, std::void_t<decltype(std::declval<T>().id)>> : std::true_type {};
 
 // ─── Output helpers ──────────────────────────────────────────────────────────
 
@@ -136,6 +143,33 @@ template <typename T, bool Present>
 struct emit_ssl3_state_version {
     static void emit() { /* field not present in this version, nothing to emit */ }
 };
+// --- bssl::SSL3_STATE TLS 1.3 traffic secrets (Android 16+ InplaceVector layout) -------
+// write_traffic_secret / read_traffic_secret / exporter_secret are consecutive
+// InplaceVector<uint8_t,SSL_MAX_MD_SIZE> (48 bytes storage + 1 size_ byte). eCapture reads
+// them in uretprobe_bssl_do_handshake via BSSL__SSL3_STATE_{SERVER,CLIENT}_TRAFFIC_SECRET_0
+// (+ _LEN size_ byte). Emit them here so the values track the struct instead of being
+// hand-maintained; the *_LEN offset is (next vector's offset) - 1, robust to any padding.
+// Absent on Android <=15 (private raw arrays) -> emit nothing; masterkey.h defaults apply.
+template <typename T, bool Present>
+struct emit_ssl3_traffic_secrets {
+    static void emit() { /* Android <=15: not public; nothing to emit */ }
+};
+template <typename T>
+struct emit_ssl3_traffic_secrets<T, true> {
+    static void emit() {
+        size_t w = offsetof(T, write_traffic_secret);
+        size_t r = offsetof(T, read_traffic_secret);
+        size_t e = offsetof(T, exporter_secret);
+        printf("// bssl::SSL3_STATE->write_traffic_secret (labelled SERVER_TRAFFIC_SECRET_0)\n");
+        printf("#define BSSL__SSL3_STATE_SERVER_TRAFFIC_SECRET_0 0x%lx\n\n", w);
+        printf("// bssl::SSL3_STATE->read_traffic_secret (labelled CLIENT_TRAFFIC_SECRET_0)\n");
+        printf("#define BSSL__SSL3_STATE_CLIENT_TRAFFIC_SECRET_0 0x%lx\n\n", r);
+        printf("// InplaceVector size_ bytes (== next vector offset - 1)\n");
+        printf("#define BSSL__SSL3_STATE_SERVER_TRAFFIC_SECRET_0_LEN 0x%lx\n\n", r - 1);
+        printf("#define BSSL__SSL3_STATE_CLIENT_TRAFFIC_SECRET_0_LEN 0x%lx\n\n", e - 1);
+    }
+};
+
 template <typename T>
 struct emit_ssl3_state_version<T, true> {
     static void emit() {
@@ -144,6 +178,19 @@ struct emit_ssl3_state_version<T, true> {
         printf("// boringssl_masterkey.h to read the TLS version before the 1.2/1.3 branch.\n");
         format("bssl::SSL3_STATE", "version", offsetof(T, version));
     }
+};
+
+// --- ssl_cipher_st::id -------------------------------------------------------
+// Present (Android <=16) -> emit SSL_CIPHER_ST_ID = offsetof(id) (uint32).
+// Absent  (Android 17+)  -> field renamed to protocol_id (uint16); emit the same
+// SSL_CIPHER_ST_ID macro at offsetof(protocol_id) so downstream kern code is stable.
+template <typename T, bool Present>
+struct emit_cipher_id {
+    static void emit() { format("ssl_cipher_st", "id", offsetof(T, protocol_id)); }
+};
+template <typename T>
+struct emit_cipher_id<T, true> {
+    static void emit() { format("ssl_cipher_st", "id", offsetof(T, id)); }
 };
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -168,7 +215,7 @@ int main() {
     format("bio_st",        "num",    offsetof(bio_st, num));
     format("bio_st",        "method", offsetof(bio_st, method));
     format("bio_method_st", "type",   offsetof(bio_method_st, type));
-    format("ssl_cipher_st", "id",     offsetof(ssl_cipher_st, id));
+    emit_cipher_id<ssl_cipher_st, ssl_cipher_has_id<ssl_cipher_st>::value>::emit();
 
     // ── bssl::SSL3_STATE ──────────────────────────────────────────────────────
     format("bssl::SSL3_STATE", "hs",                  offsetof(bssl::SSL3_STATE, hs));
@@ -176,6 +223,16 @@ int main() {
     format("bssl::SSL3_STATE", "exporter_secret",     offsetof(bssl::SSL3_STATE, exporter_secret));
     format("bssl::SSL3_STATE", "established_session", offsetof(bssl::SSL3_STATE, established_session));
     emit_ssl3_state_version<bssl::SSL3_STATE, ssl3_state_has_version<bssl::SSL3_STATE>::value>::emit();
+    emit_ssl3_traffic_secrets<bssl::SSL3_STATE, ssl3_state_has_version<bssl::SSL3_STATE>::value>::emit();
+
+    // ── ssl_st role bit (client vs server) ────────────────────────────────────
+    // ssl_st.server is a bool bitfield (can't offsetof directly). It is the first
+    // bitfield right after renegotiate_mode (an enum), so its byte = offsetof(
+    // renegotiate_mode) + sizeof(enum). eCapture reads this byte and masks 0x1 to map
+    // write/read_traffic_secret to the correct absolute CLIENT/SERVER NSS keylog labels.
+    printf("// ssl_st->server (bool:1) byte — mask 0x1; 1=server endpoint, 0=client\n");
+    printf("#define BSSL__SSL_ST_SERVER 0x%lx\n\n",
+           offsetof(ssl_st, renegotiate_mode) + sizeof(ssl_renegotiate_mode_t));
 
     // ── bssl::SSL_HANDSHAKE ───────────────────────────────────────────────────
     // TLS 1.3 secret offsets (secret_, early_traffic_secret_, …) are NOT emitted
